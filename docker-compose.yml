@@ -1,0 +1,96 @@
+name: finsight
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-finsight}
+      POSTGRES_USER: ${POSTGRES_USER:-finsight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finsight}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finsight}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [finsight]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [finsight]
+
+  fastapi:
+    build: ./analytics-service
+    environment:
+      ENVIRONMENT: production
+      REQUIRE_SERVICE_TOKEN: "true"
+      FASTAPI_SERVICE_TOKEN: ${FASTAPI_SERVICE_TOKEN:-shared-service-to-service-secret}
+      LOG_LEVEL: INFO
+    expose:
+      - "9000"
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [finsight]
+
+  django:
+    build: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      fastapi:
+        condition: service_started
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,django}
+      DATABASE_URL: postgres://${POSTGRES_USER:-finsight}:${POSTGRES_PASSWORD:-finsight}@postgres:5432/${POSTGRES_DB:-finsight}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-too}
+      FASTAPI_URL: http://fastapi:9000
+      FASTAPI_SERVICE_TOKEN: ${FASTAPI_SERVICE_TOKEN:-shared-service-to-service-secret}
+      FASTAPI_TIMEOUT_SECONDS: ${FASTAPI_TIMEOUT_SECONDS:-8}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [finsight]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api
+    depends_on:
+      django:
+        condition: service_started
+    ports:
+      - "5173:80"
+    networks: [finsight]
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  finsight:
+    driver: bridge
